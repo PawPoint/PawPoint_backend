@@ -12,3 +12,4 @@ class PetModel(BaseModel):
     birthday: Optional[str] = ""
     characteristics: Optional[str] = ""
     imageUrl: str = ""
+    isDeceased: bool = False
