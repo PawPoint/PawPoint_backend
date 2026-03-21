@@ -10,8 +10,9 @@ if not firebase_admin._apps:
     cred = credentials.Certificate("firebase-credentials.json")
     firebase_admin.initialize_app(cred)
 
-# Import pet routes
+# Import routes
 from routes.add_pet_routes import router as pet_router
+from routes.auth_routes import router as auth_router
 
 app = FastAPI(title="PawPoint API")
 
@@ -24,8 +25,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Register the pet routes
+# Register routes
 app.include_router(pet_router, tags=["Pets"])
+app.include_router(auth_router, tags=["Auth"])
 
 @app.get("/")
 def read_root():
