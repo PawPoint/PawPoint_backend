@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends
-from models.auth_model import LoginRequest, SignupRequest
+from models.auth_model import LoginRequest, SignupRequest, LoginResponse, UserModel
 from logic.auth_logic import AuthService
 
 router = APIRouter()
@@ -11,20 +11,29 @@ def get_auth_service():
     return AuthService(api_key=FIREBASE_API_KEY)
 
 
-@router.post("/api/auth/login")
+@router.post("/api/auth/login", response_model=LoginResponse)
 async def login(request: LoginRequest, service: AuthService = Depends(get_auth_service)):
-    """Authenticate a user with email and password."""
-    return service.login(email=request.email, password=request.password)
+    """
+    Authenticate a user with email and password.
+    Returns uid, email, token, and role.
+    """
+    result = service.login(email=request.email, password=request.password)
+    return result
 
 
-@router.post("/api/auth/signup")
+@router.post("/api/auth/signup", response_model=UserModel)
 async def signup(request: SignupRequest, service: AuthService = Depends(get_auth_service)):
-    """Create a new user account."""
-    return service.signup(
+    """
+    Create a new user account.
+    Saves uid, email, name, phone, address, role, and createdAt in Firestore.
+    """
+    result = service.signup(
         email=request.email,
         password=request.password,
-        confirm_password=request.confirmPassword,
+        confirm_password=request.confirm_password,
         name=request.name,
         phone=request.phone,
         address=request.address,
+        role=request.role or "customer",  # default role if not provided
     )
+    return result
