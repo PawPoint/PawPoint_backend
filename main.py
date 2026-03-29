@@ -13,6 +13,8 @@ if not firebase_admin._apps:
 # Import routes
 from routes.add_pet_routes import router as pet_router
 from routes.auth_routes import router as auth_router
+from routes.appointment_routes import router as appointment_router
+from routes.user_routes import router as user_router
 
 app = FastAPI(title="PawPoint API")
 
@@ -28,6 +30,8 @@ app.add_middleware(
 # Register routes
 app.include_router(pet_router, tags=["Pets"])
 app.include_router(auth_router, tags=["Auth"])
+app.include_router(appointment_router, tags=["Appointments"])
+app.include_router(user_router, tags=["Users"])
 
 @app.get("/")
 def read_root():
