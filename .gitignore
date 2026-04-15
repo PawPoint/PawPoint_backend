@@ -2,3 +2,6 @@ firebase-credentials.json
 __pycache__/
 *.pyc
 .env
+auth_logic.py
+auth_model.py
+auth_routes.py
