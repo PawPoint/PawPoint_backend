@@ -8,6 +8,13 @@ class AppointmentCreate(BaseModel):
     doctor: str
     dateTime: str  # ISO 8601 string
     status: str = "pending"
+    
+    # ── Payment Fields ────────────────────────────────────────────────────────
+    totalPrice: float = 0.0
+    amountPaidOnline: float = 0.0
+    balanceRemaining: float = 0.0
+    paymentStatus: str = "unpaid"
+    paymentMethod: str = ""
 
 
 class AppointmentCancel(BaseModel):
