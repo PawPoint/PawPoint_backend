@@ -76,14 +76,23 @@ def get_appointments(user_id: str) -> list:
             data = doc.to_dict()
             print(f"[get_appointments] Found doc {doc.id}: {data}")
             entry = {"id": doc.id, **data}
-            # If the top-level collection has a newer/more authoritative status, use it
+            # ── Status merge logic ─────────────────────────────────────
+            # Terminal statuses set directly on the user sub-collection should
+            # NEVER be overridden by the top-level collection, which may lag.
+            _TERMINAL_STATUSES = {"rejected", "cancelled", "auto_cancelled", "completed"}
+            sub_status = entry.get("status", "")
             if doc.id in top_level_status and top_level_status[doc.id]:
-                entry["status"] = top_level_status[doc.id]
+                top_status = top_level_status[doc.id]
+                # Only use the top-level status if the sub-collection does NOT
+                # already hold a final/terminal value.
+                if sub_status not in _TERMINAL_STATUSES:
+                    entry["status"] = top_status
             results.append(entry)
         print(f"[get_appointments] Total appointments found: {len(results)}")
         # Sort in Python to avoid requiring a Firestore composite index
         results.sort(key=lambda x: str(x.get("dateTime", "")), reverse=True)
         return results
+
     except Exception as e:
         print(f"[get_appointments] Error fetching appointments for {user_id}: {e}")
         raise
@@ -94,13 +103,9 @@ def cancel_appointment(user_id: str, appointment_id: str) -> dict:
     Cancel an appointment initiated by the USER.
 
     Refund Matrix (user-initiated):
-      - status == 'pending'  → full refund (amountPaidOnline returned)
-      - status == 'approved' → no refund (downpayment forfeited)
+      - ANY status (pending, scheduled, approved) → No refund (downpayment forfeited)
     """
-    import requests, base64, os
     from datetime import datetime as dt
-
-    PAYMONGO_SECRET_KEY = os.getenv("PAYMONGO_SECRET_KEY")
 
     db = get_db()
 
@@ -115,87 +120,13 @@ def cancel_appointment(user_id: str, appointment_id: str) -> dict:
         return {"error": "Appointment not found"}
 
     data = doc.to_dict() or {}
-    current_status = data.get("status", "pending")
     amount_paid = float(data.get("amountPaidOnline", 0) or 0)
-    checkout_session_id = data.get("checkoutSessionId", "")
 
     # ── Determine refund eligibility ──────────────────────────────────────────
-    if current_status in ("pending", "scheduled"):
-        # Full refund
-        refund_status = "refunded" if (amount_paid > 0 and checkout_session_id) else (
-            "refund_not_needed" if amount_paid == 0 else "refund_pending"
-        )
-        refund_note = "Full refund processed — appointment was still pending."
-        refund_amount = amount_paid
-    elif current_status == "approved":
-        # No refund — downpayment forfeited
-        refund_status = "forfeited"
-        refund_note = "No refund — appointment was already approved."
-        refund_amount = 0.0
-    else:
-        refund_status = "not_applicable"
-        refund_note = "Appointment was not in a refundable state."
-        refund_amount = 0.0
-
-    # ── Attempt PayMongo refund if eligible ────────────────────────────────────
-    paymongo_refund_id = None
-    if refund_status == "refunded" and checkout_session_id:
-        try:
-            auth_bytes = f"{PAYMONGO_SECRET_KEY}:".encode("ascii")
-            b64 = base64.b64encode(auth_bytes).decode("ascii")
-            headers = {
-                "accept": "application/json",
-                "Content-Type": "application/json",
-                "authorization": f"Basic {b64}",
-            }
-            # Retrieve the payment_id from the checkout session
-            session_resp = requests.get(
-                f"https://api.paymongo.com/v1/checkout_sessions/{checkout_session_id}",
-                headers=headers,
-            )
-            if session_resp.status_code == 200:
-                session_data = session_resp.json()
-                payment_id = (
-                    session_data.get("data", {})
-                    .get("attributes", {})
-                    .get("payment_intent", {})
-                    .get("id")
-                )
-                if payment_id:
-                    # Retrieve the payment to get the actual payment resource ID
-                    pi_resp = requests.get(
-                        f"https://api.paymongo.com/v1/payment_intents/{payment_id}",
-                        headers=headers,
-                    )
-                    if pi_resp.status_code == 200:
-                        pi_data = pi_resp.json()
-                        payments = pi_data.get("data", {}).get("attributes", {}).get("payments", [])
-                        if payments:
-                            actual_payment_id = payments[0].get("id")
-                            refund_payload = {
-                                "data": {
-                                    "attributes": {
-                                        "amount": int(refund_amount * 100),
-                                        "payment_id": actual_payment_id,
-                                        "reason": "customer_requested",
-                                        "notes": "User cancelled pending appointment — full refund issued.",
-                                    }
-                                }
-                            }
-                            refund_resp = requests.post(
-                                "https://api.paymongo.com/v1/refunds",
-                                json=refund_payload,
-                                headers=headers,
-                            )
-                            if refund_resp.status_code in (200, 201):
-                                paymongo_refund_id = refund_resp.json().get("data", {}).get("id")
-                                refund_status = "refunded"
-                            else:
-                                print(f"[cancel_appointment] PayMongo refund failed: {refund_resp.text}")
-                                refund_status = "refund_pending"
-        except Exception as e:
-            print(f"[cancel_appointment] Refund error: {e}")
-            refund_status = "refund_pending"
+    # Requirement: No refund for user-initiated cancellations.
+    refund_status = "forfeited"
+    refund_note = "No refund — downpayment forfeited (user-initiated cancellation)."
+    refund_amount = 0.0
 
     # ── Update Firestore ───────────────────────────────────────────────────────
     cancelled_at = dt.utcnow().isoformat()
@@ -207,8 +138,6 @@ def cancel_appointment(user_id: str, appointment_id: str) -> dict:
         "refundNote": refund_note,
         "refundAmount": refund_amount,
     }
-    if paymongo_refund_id:
-        update_payload["paymongoRefundId"] = paymongo_refund_id
 
     user_doc_ref.update(update_payload)
 
@@ -400,6 +329,33 @@ def decline_reschedule(user_id: str, appointment_id: str) -> dict:
 
     # Mirror to top-level collection
     db.collection("appointments").document(appointment_id).set({**data, **payload, "user_id": user_id}, merge=True)
+
+    # ── Send Email Notification & Refund Receipt ──────────────────────────────
+    if refund_status in ("refunded", "refund_pending", "refund_not_needed"):
+        try:
+            from logic.email_logic import send_cancellation_email
+            # Fetch user email and name
+            user_doc = db.collection("users").document(user_id).get()
+            u_data = user_doc.to_dict() or {}
+            user_email = u_data.get("email")
+            user_name = u_data.get("name") or u_data.get("fullName") or "Valued Customer"
+            
+            if user_email:
+                service = data.get("service", "your appointment")
+                pet = data.get("pet", "your pet")
+                appt_dt = data.get("dateTime", "")
+                send_cancellation_email(
+                    to_email=user_email,
+                    user_name=user_name,
+                    appointment_id=appointment_id,
+                    service_name=service,
+                    pet_name=pet,
+                    appointment_date=appt_dt,
+                    amount_refunded=amount_paid,
+                    reason="User declined the proposed rescheduled date/time."
+                )
+        except Exception as e:
+            print(f"[decline_reschedule] Email sending failed: {e}")
 
     updated = user_ref.get()
     return {"id": appointment_id, "refund_status": refund_status, "refund_amount": amount_paid, **updated.to_dict()}
