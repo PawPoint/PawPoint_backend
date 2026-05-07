@@ -8,8 +8,49 @@ from logic.appointment_logic import (
     reschedule_appointment,
 )
 from dependencies import verify_user_token
+import os
 
 router = APIRouter()
+
+
+@router.get("/api/test-email")
+async def test_email_route():
+    """Debug: test SMTP connection and email sending. Remove after fixing."""
+    import smtplib
+    smtp_host = os.getenv("SMTP_HOST")
+    smtp_port = int(os.getenv("SMTP_PORT", 587))
+    smtp_user = os.getenv("SMTP_USER")
+    smtp_pass = os.getenv("SMTP_PASS")
+
+    # Report loaded env vars (mask password)
+    env_status = {
+        "SMTP_HOST": smtp_host or "NOT SET",
+        "SMTP_PORT": smtp_port,
+        "SMTP_USER": smtp_user or "NOT SET",
+        "SMTP_PASS": ("SET (" + str(len(smtp_pass)) + " chars)") if smtp_pass else "NOT SET",
+    }
+
+    if not all([smtp_host, smtp_user, smtp_pass]):
+        return {"status": "failed", "reason": "Missing SMTP env vars", "env": env_status}
+
+    try:
+        from email.mime.text import MIMEText
+        from email.mime.multipart import MIMEMultipart
+        msg = MIMEMultipart()
+        msg['From'] = f"PawPoint <{smtp_user}>"
+        msg['To'] = smtp_user
+        msg['Subject'] = "PawPoint SMTP Test"
+        msg.attach(MIMEText("<p>SMTP test email from PawPoint backend. If you see this, email is working!</p>", 'html'))
+
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=15) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_pass)
+            server.send_message(msg)
+
+        return {"status": "success", "message": f"Test email sent to {smtp_user}", "env": env_status}
+    except Exception as e:
+        return {"status": "failed", "error": str(e), "env": env_status}
+
 
 class RescheduleRequest(BaseModel):
     new_datetime: str   # ISO 8601 string e.g. "2026-05-10T14:00:00"
@@ -107,5 +148,3 @@ async def decline_reschedule_route(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-        raise HTTPException(status_code=500, detail=str(e))
