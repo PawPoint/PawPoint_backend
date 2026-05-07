@@ -59,11 +59,10 @@ def get_appointments(user_id: str) -> list:
 
         # Build a status lookup from the top-level approved/completed collection
         top_level_status: dict = {}
-        top_docs = db.collection("appointments").stream()
+        top_docs = db.collection("appointments").where("user_id", "==", user_id).stream()
         for top in top_docs:
             top_data = top.to_dict() or {}
-            if top_data.get("user_id") == user_id:
-                top_level_status[top.id] = top_data.get("status", "")
+            top_level_status[top.id] = top_data.get("status", "")
 
         docs = (
             db.collection("users")
@@ -144,6 +143,28 @@ def cancel_appointment(user_id: str, appointment_id: str) -> dict:
     top_doc_ref = db.collection("appointments").document(appointment_id)
     if top_doc_ref.get().exists:
         top_doc_ref.update(update_payload)
+
+    # ── Send cancellation confirmation email to user ───────────────────────────
+    try:
+        from logic.email_logic import send_cancellation_email
+        user_doc = db.collection("users").document(user_id).get()
+        u_data = user_doc.to_dict() or {}
+        user_email = u_data.get("email")
+        user_name = u_data.get("name") or u_data.get("fullName") or "Valued Customer"
+        if user_email:
+            send_cancellation_email(
+                to_email=user_email,
+                user_name=user_name,
+                appointment_id=appointment_id,
+                service_name=data.get("service", "your appointment"),
+                pet_name=data.get("pet", "your pet"),
+                appointment_date=data.get("dateTime", ""),
+                amount_refunded=amount_paid,
+                reason="User-initiated cancellation.",
+                refunded=False,   # no refund — downpayment forfeited
+            )
+    except Exception as e:
+        print(f"[cancel_appointment] Email notification failed: {e}")
 
     updated = user_doc_ref.get()
     return {

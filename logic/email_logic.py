@@ -79,7 +79,8 @@ def send_cancellation_email(
     pet_name: str,
     appointment_date: str,
     amount_refunded: float,
-    reason: str = ""
+    reason: str = "",
+    refunded: bool = True,
 ):
     """
     Sends a cancellation and refund receipt email to the user.
@@ -98,11 +99,35 @@ def send_cancellation_email(
         print("[email_logic] ERROR: SMTP credentials not configured or still using placeholders.")
         return False
 
-    subject = f"Appointment Cancelled & Refund Receipt - {service_name}"
-    
+    subject = (
+        f"Appointment Cancelled & Refund Confirmation - {service_name}"
+        if refunded
+        else f"Appointment Cancellation Confirmation - {service_name}"
+    )
+
     # Format currency
     formatted_amount = f"₱{amount_refunded:,.2f}"
-    
+
+    # Refund or forfeited block
+    if refunded and amount_refunded > 0:
+        payment_block = f"""
+        <div style="background-color: #f0f8ff; border-left: 5px solid #007bff; padding: 15px; margin: 20px 0;">
+            <h3 style="margin-top: 0; color: #007bff;">Refund Information</h3>
+            <p style="font-size: 1.2em; margin-bottom: 5px;">Total Refunded: <strong>{formatted_amount}</strong></p>
+            <p style="font-size: 0.9em; color: #555;">The amount has been credited back to your original payment method.
+            Please allow 3-7 business days for the transaction to reflect in your account.</p>
+        </div>"""
+    elif not refunded and amount_refunded > 0:
+        payment_block = f"""
+        <div style="background-color: #fff8f0; border-left: 5px solid #f59e0b; padding: 15px; margin: 20px 0;">
+            <h3 style="margin-top: 0; color: #f59e0b;">Payment Notice</h3>
+            <p style="font-size: 1.2em; margin-bottom: 5px;">Downpayment Forfeited: <strong>{formatted_amount}</strong></p>
+            <p style="font-size: 0.9em; color: #555;">As per our cancellation policy, user-initiated cancellations are
+            not eligible for a refund. Your downpayment has been forfeited.</p>
+        </div>"""
+    else:
+        payment_block = ""
+
     # HTML Content
     html_content = f"""
     <html>
@@ -110,12 +135,12 @@ def send_cancellation_email(
         <div style="max-width: 600px; margin: 0 auto; border: 1px solid #ddd; border-radius: 8px; overflow: hidden;">
             <div style="background-color: #f8f9fa; padding: 20px; text-align: center; border-bottom: 1px solid #ddd;">
                 <h1 style="color: #d9534f; margin: 0;">Appointment Cancelled</h1>
-                <p style="font-size: 1.1em; color: #777;">Refund Receipt</p>
+                <p style="font-size: 1.1em; color: #777;">{"Refund Confirmation" if refunded else "Cancellation Confirmation"}</p>
             </div>
             <div style="padding: 20px;">
                 <p>Hi <strong>{user_name}</strong>,</p>
-                <p>We are writing to inform you that your appointment has been cancelled. A full refund has been processed for this transaction.</p>
-                
+                <p>{"We are writing to confirm that your appointment has been cancelled and a full refund has been processed." if refunded else "We are writing to confirm that your appointment has been successfully cancelled."}</p>
+
                 <div style="background-color: #fdf7f7; border-left: 5px solid #d9534f; padding: 15px; margin: 20px 0;">
                     <h3 style="margin-top: 0; color: #d9534f;">Cancellation Details</h3>
                     <table style="width: 100%; border-collapse: collapse;">
@@ -138,11 +163,7 @@ def send_cancellation_email(
                     </table>
                 </div>
 
-                <div style="background-color: #f0f8ff; border-left: 5px solid #007bff; padding: 15px; margin: 20px 0;">
-                    <h3 style="margin-top: 0; color: #007bff;">Refund Information</h3>
-                    <p style="font-size: 1.2em; margin-bottom: 5px;">Total Refunded: <strong>{formatted_amount}</strong></p>
-                    <p style="font-size: 0.9em; color: #555;">The amount has been credited back to your original payment method. Please allow 3-7 business days for the transaction to reflect in your account.</p>
-                </div>
+                {payment_block}
 
                 {f'<p><strong>Reason:</strong> {reason}</p>' if reason else ""}
 
