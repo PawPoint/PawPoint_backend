@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from logic.payment_logic import create_paymongo_checkout, verify_paymongo_session
+from firebase_admin import firestore
 
 router = APIRouter()
 

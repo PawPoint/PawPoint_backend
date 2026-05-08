@@ -137,7 +137,8 @@ async def decline_reschedule_route(
     appointment_id: str,
     uid: str = Depends(verify_user_token)
 ):
-    """User declines the clinic's proposed reschedule — cancels and refunds."""
+    """User declines the clinic's proposed reschedule — cancels the appointment."""
+
     try:
         from logic.appointment_logic import decline_reschedule
         result = decline_reschedule(uid, appointment_id)

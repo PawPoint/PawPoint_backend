@@ -11,39 +11,46 @@ def create_appointment(user_id: str, data: dict) -> dict:
     Create a new appointment document.
     Saves to both:
     1. users/{user_id}/appointments/{doc_id}
-    2. appointments/{doc_id} (Flat collection for Admin access/financials)
+    2. appointments/{doc_id} (Flat collection for Admin access)
+    This ensures near-instant loading for the Admin Dashboard.
     """
     db = get_db()
+    batch = db.batch()
     
-    # ── Fetch User's Real Name from Profile ──────────────────────────────────
+    # ── Fetch User's Real Name and Email ──────────────────────────────────
     user_name = "Unknown User"
+    user_email = ""
     try:
         user_doc = db.collection("users").document(user_id).get()
         if user_doc.exists:
             u_data = user_doc.to_dict() or {}
-            # Try common field names for the user's name
             user_name = u_data.get("fullName") or u_data.get("name") or u_data.get("username") or "Unknown User"
+            user_email = u_data.get("email", "")
     except Exception as e:
-        print(f"[create_appointment] Warning: Could not fetch user name: {e}")
+        print(f"[create_appointment] Warning: Could not fetch user data: {e}")
 
-    # Create the reference in the user's subcollection
-    user_doc_ref = db.collection("users").document(user_id).collection("appointments").document()
-    doc_id = user_doc_ref.id
+    # 1. Create a reference in the user's subcollection
+    user_ref = db.collection("users").document(user_id).collection("appointments").document()
+    doc_id = user_ref.id
     
-    # Enrich the data with verified user identity
+    # 2. Create the exact same reference in the top-level collection
+    top_ref = db.collection("appointments").document(doc_id)
+    
     full_data = {
         **data, 
+        "id": doc_id,
         "user_id": user_id,
-        "user_name": user_name
+        "user_name": user_name,
+        "user_email": user_email,
+        "createdAt": dt.utcnow().isoformat(),
     }
     
-    # Save to user subcollection
-    user_doc_ref.set(full_data)
+    # ── Atomic Write ─────────────────────────────────────────────────────────
+    batch.set(user_ref, full_data)
+    batch.set(top_ref, full_data)
+    batch.commit()
     
-    # Mirror to top-level 'appointments' collection will now be handled in approve_appointment
-    # in backend_admin/logic/admin_logic.py
-    
-    return {"id": doc_id, **full_data}
+    return full_data
 
 
 def get_appointments(user_id: str) -> list:
@@ -271,11 +278,8 @@ def decline_reschedule(user_id: str, appointment_id: str) -> dict:
     """
     User declines the proposed reschedule.
     - status ← 'cancelled'
-    - Full refund of downpayment via PayMongo
+    - No refund processed.
     """
-    import base64, requests as req, os
-    PAYMONGO_SECRET_KEY = os.getenv("PAYMONGO_SECRET_KEY")
-
     db = get_db()
     user_ref = (
         db.collection("users")
@@ -292,58 +296,14 @@ def decline_reschedule(user_id: str, appointment_id: str) -> dict:
         return {"error": "Appointment is not in reschedule_proposed state"}
 
     amount_paid = float(data.get("amountPaidOnline", 0) or 0)
-    session_id = data.get("checkoutSessionId", "")
-    refund_status = "refund_not_needed"
-
-    if session_id and amount_paid > 0:
-        auth = base64.b64encode(f"{PAYMONGO_SECRET_KEY}:".encode()).decode()
-        headers = {
-            "accept": "application/json",
-            "Content-Type": "application/json",
-            "authorization": f"Basic {auth}",
-        }
-        try:
-            sess = req.get(
-                f"https://api.paymongo.com/v1/checkout_sessions/{session_id}",
-                headers=headers, timeout=10,
-            )
-            pi_id = (sess.json().get("data", {})
-                     .get("attributes", {})
-                     .get("payment_intent", {})
-                     .get("id")) if sess.status_code == 200 else None
-
-            if pi_id:
-                pi = req.get(
-                    f"https://api.paymongo.com/v1/payment_intents/{pi_id}",
-                    headers=headers, timeout=10,
-                )
-                payments = (pi.json().get("data", {})
-                            .get("attributes", {})
-                            .get("payments", [])) if pi.status_code == 200 else []
-                if payments:
-                    refund = req.post(
-                        "https://api.paymongo.com/v1/refunds",
-                        json={"data": {"attributes": {
-                            "amount": int(amount_paid * 100),
-                            "payment_id": payments[0]["id"],
-                            "reason": "others",
-                            "notes": "User declined proposed reschedule. Full refund issued.",
-                        }}},
-                        headers=headers, timeout=10,
-                    )
-                    refund_status = "refunded" if refund.status_code in (200, 201) else "refund_pending"
-        except Exception as e:
-            print(f"[decline_reschedule] Refund error: {e}")
-            refund_status = "refund_pending"
-
     cancelled_at = dt.utcnow().isoformat()
     payload = {
         "status": "cancelled",
         "cancelledBy": "user_declined_reschedule",
         "cancelledAt": cancelled_at,
-        "refundStatus": refund_status,
-        "refundAmount": amount_paid,
-        "refundNote": "User declined proposed reschedule. Full refund processed.",
+        "refundStatus": "not_applicable",
+        "refundAmount": 0.0,
+        "refundNote": "User declined proposed reschedule. No refund processed.",
         "proposedDateTime": "",
     }
     user_ref.update(payload)
@@ -351,32 +311,33 @@ def decline_reschedule(user_id: str, appointment_id: str) -> dict:
     # Mirror to top-level collection
     db.collection("appointments").document(appointment_id).set({**data, **payload, "user_id": user_id}, merge=True)
 
-    # ── Send Email Notification & Refund Receipt ──────────────────────────────
-    if refund_status in ("refunded", "refund_pending", "refund_not_needed"):
-        try:
-            from logic.email_logic import send_cancellation_email
-            # Fetch user email and name
-            user_doc = db.collection("users").document(user_id).get()
-            u_data = user_doc.to_dict() or {}
-            user_email = u_data.get("email")
-            user_name = u_data.get("name") or u_data.get("fullName") or "Valued Customer"
-            
-            if user_email:
-                service = data.get("service", "your appointment")
-                pet = data.get("pet", "your pet")
-                appt_dt = data.get("dateTime", "")
-                send_cancellation_email(
-                    to_email=user_email,
-                    user_name=user_name,
-                    appointment_id=appointment_id,
-                    service_name=service,
-                    pet_name=pet,
-                    appointment_date=appt_dt,
-                    amount_refunded=amount_paid,
-                    reason="User declined the proposed rescheduled date/time."
-                )
-        except Exception as e:
-            print(f"[decline_reschedule] Email sending failed: {e}")
+    # ── Send Email Notification ──────────────────────────────
+    try:
+        from logic.email_logic import send_cancellation_email
+        # Fetch user email and name
+        user_doc = db.collection("users").document(user_id).get()
+        u_data = user_doc.to_dict() or {}
+        user_email = u_data.get("email")
+        user_name = u_data.get("name") or u_data.get("fullName") or "Valued Customer"
+        
+        if user_email:
+            service = data.get("service", "your appointment")
+            pet = data.get("pet", "your pet")
+            appt_dt = data.get("dateTime", "")
+            send_cancellation_email(
+                to_email=user_email,
+                user_name=user_name,
+                appointment_id=appointment_id,
+                service_name=service,
+                pet_name=pet,
+                appointment_date=appt_dt,
+                amount_refunded=0.0,
+                reason="User declined the proposed rescheduled date/time.",
+                refunded=False
+            )
+    except Exception as e:
+        print(f"[decline_reschedule] Email sending failed: {e}")
 
     updated = user_ref.get()
-    return {"id": appointment_id, "refund_status": refund_status, "refund_amount": amount_paid, **updated.to_dict()}
+    return {"id": appointment_id, "refund_status": "not_applicable", "refund_amount": 0.0, **updated.to_dict()}
+
